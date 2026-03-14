@@ -279,6 +279,7 @@ struct cmdq {
 	u32			axid;
 	u32			tbu;
 	bool		smmu_v3_enabled;
+	bool		check_tf_enabled;
 	bool		err_irq;
 	void __iomem	*dram_pwr_base;
 	bool		error_irq_sw_req;
@@ -1128,10 +1129,19 @@ static void cmdq_task_exec(struct cmdq_pkt *pkt, struct cmdq_thread *thread)
 	task->pkt = pkt;
 	task->exec_time = sched_clock();
 
-	if (atomic_read(&cmdq->usage) <= 0)
+	if (atomic_read(&cmdq->usage) <= 0) {
 		cmdq_err("hwid:%hu usage:%d idx:%u usage:%d gce off",
 			cmdq->hwid, atomic_read(&cmdq->usage),
 			thread->idx, atomic_read(&thread->usage));
+		dump_stack();
+		cmdq_set_alldump(true);
+		cmdq_dump_pkt(pkt, 0, true);
+		cmdq_set_alldump(false);
+		cmdq_util_aee_ex(CMDQ_AEE_EXCEPTION, "CMDQ",
+			"hwid:%hu usage:%d idx:%u usage:%d gce off",
+			cmdq->hwid, atomic_read(&cmdq->usage),
+			thread->idx, atomic_read(&thread->usage));
+	}
 
 	if (list_empty(&thread->task_busy_list)) {
 
@@ -1397,7 +1407,7 @@ static void cmdq_thread_irq_handler(struct cmdq *cmdq,
 	if (cmdq->error_irq_sw_req && (irq_flag & CMDQ_THR_IRQ_ERROR)) {
 		//dump smmu rg
 #if IS_ENABLED(CONFIG_DEVICE_MODULES_ARM_SMMU_V3)
-		if (cmdq->smmu_v3_enabled) {
+		if (cmdq->smmu_v3_enabled && cmdq->check_tf_enabled) {
 			axid[0] = cmdq->axid;
 			ret = cmdq_util_controller->check_tf(cmdq->mbox.dev,
 				cmdq->sid, cmdq->tbu, axid);
@@ -1470,7 +1480,7 @@ static void cmdq_thread_irq_handler(struct cmdq *cmdq,
 		cmdq_thread_dump_pkt_by_pc(thread, curr_pa, true);
 	}
 #if IS_ENABLED(CONFIG_DEVICE_MODULES_ARM_SMMU_V3)
-	if (cmdq->smmu_v3_enabled) {
+	if (cmdq->smmu_v3_enabled && cmdq->check_tf_enabled) {
 		axid[0] = cmdq->axid;
 		ret = cmdq_util_controller->check_tf(cmdq->mbox.dev,
 			cmdq->sid, cmdq->tbu, axid);
@@ -3045,7 +3055,10 @@ static int cmdq_probe(struct platform_device *pdev)
 
 #if IS_ENABLED(CONFIG_DEVICE_MODULES_ARM_SMMU_V3)
 	cmdq->smmu_v3_enabled = smmu_v3_enabled();
-	cmdq_msg("%s smmu_v3_enable:%d", __func__, cmdq->smmu_v3_enabled);
+	if (of_property_read_bool(dev->of_node, "check-tf-enabled"))
+		cmdq->check_tf_enabled = true;
+	cmdq_msg("%s smmu_v3_enable:%d check_tf_enabled:%d",
+		__func__, cmdq->smmu_v3_enabled, cmdq->check_tf_enabled);
 #endif
 	if (!of_parse_phandle_with_args(
 		cmdq->share_dev->of_node, "iommus", "#iommu-cells", 0, &args))
@@ -3281,6 +3294,7 @@ void cmdq_mbox_disable(void *chan)
 		typeof(*cmdq), mbox);
 	struct cmdq_thread *thread;
 	s32 usage, i, thd_usage;
+	unsigned long flags;
 
 	mutex_lock(&cmdq->mbox_mutex);
 
@@ -3314,9 +3328,24 @@ void cmdq_mbox_disable(void *chan)
 
 	thd_usage = atomic_dec_return(&cmdq->thread[i].usage);
 	if (!thd_usage && !list_empty(&cmdq->thread[i].task_busy_list)) {
+		struct cmdq_task *task;
+
 		cmdq_err("hwid:%u idx:%d usage:%d still has tasks",
 			cmdq->hwid, i, thd_usage);
 		dump_stack();
+
+		spin_lock_irqsave(&thread->chan->lock, flags);
+		list_for_each_entry(task, &thread->task_busy_list, list_entry)
+			if(task->pkt) {
+				cmdq_set_alldump(true);
+				cmdq_dump_pkt(task->pkt, 0, true);
+				cmdq_set_alldump(false);
+			}
+		spin_unlock_irqrestore(&thread->chan->lock, flags);
+		cmdq_util_aee_ex(CMDQ_AEE_EXCEPTION, "CMDQ",
+			"hwid:%hu usage:%d idx:%u usage:%d gce off",
+			cmdq->hwid, atomic_read(&cmdq->usage),
+			thread->idx, atomic_read(&thread->usage));
 	} else if (thd_usage == 0) {
 		thread = &cmdq->thread[i];
 		thread->mbox_dis = sched_clock();

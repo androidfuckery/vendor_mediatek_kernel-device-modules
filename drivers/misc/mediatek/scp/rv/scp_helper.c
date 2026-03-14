@@ -97,7 +97,6 @@ unsigned int scp_dvfs_cali_ready;
 
 /*scp awake variable*/
 int scp_awake_counts[SCP_CORE_TOTAL];
-unsigned int scp_awake_timeout;
 
 unsigned int scp_recovery_flag[SCP_CORE_TOTAL];
 #define SCP_A_RECOVERY_OK	0x44
@@ -1759,13 +1758,15 @@ static void scp_control_feature(enum feature_id id, bool enable)
 
 	/* send request only when scp is not down */
 	if (scp_ready[SCP_A_ID]) {
-		/* set scp freq. */
-		if (scp_dvfs_feature_enable())
-			ret = scp_request_freq();
-		if (ret < 0) {
-			pr_notice("[SCP] %s: req_freq fail\n", __func__);
-			WARN_ON(1);
-		}
+			/* set scp freq. */
+			if (scp_dvfs_feature_enable())
+				ret = scp_request_freq();
+
+			if (ret < 0) {
+				pr_notice("[SCP] %s: req_freq fail\n", __func__);
+				WARN_ON(1);
+			}
+
 	} else {
 		pr_notice("[SCP]Not send SCP DVFS request because SCP is down\n");
 		WARN_ON(1);
@@ -1789,6 +1790,8 @@ EXPORT_SYMBOL_GPL(scp_deregister_feature);
 /*scp sensor type register*/
 int sensor_control_scp(enum feature_id id, int freq)
 {
+	pr_debug("[SCP]feature_id:%d, freq:%d\n", id, freq);
+
 	if (id != SENS_FEATURE_ID) {
 		pr_debug("[SCP]register sensor id err");
 		return -EINVAL;
@@ -2834,15 +2837,6 @@ static int scp_device_probe(struct platform_device *pdev)
 			scpreg.mbrain = 1;
 		}
 	}
-
-	ret = of_property_read_u32(pdev->dev.of_node, "awake-timeout"
-			, &scp_awake_timeout);
-	if(ret) {
-		pr_notice("[SCP] awake-timeout is not defined.\n");
-		scp_awake_timeout = 100000;
-	}
-
-	pr_notice("[SCP] scp_awake_timeout = %d\n", scp_awake_timeout);
 
 	scpreg.irq0 = platform_get_irq_byname(pdev, "ipc0");
 	if (scpreg.irq0 < 0)

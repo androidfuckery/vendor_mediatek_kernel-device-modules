@@ -39,7 +39,7 @@
 #define RDMA_LAYER_NR 1UL
 #define EXTERNAL_INPUT_LAYER_NR 2UL
 #define MEMORY_INPUT_LAYER_NR 2UL
-#define SP_INPUT_LAYER_NR 10UL
+#define SP_INPUT_LAYER_NR 2UL
 #define MAX_PLANE_NR                                                           \
 	((OVL_LAYER_NR) + (EXTERNAL_INPUT_LAYER_NR) + (MEMORY_INPUT_LAYER_NR) + (SP_INPUT_LAYER_NR))
 #define MTK_PLANE_INPUT_LAYER_COUNT (OVL_LAYER_NR)
@@ -53,8 +53,6 @@
 #define PRIMARY_OVL_PHY_LAYER_NR 6L
 
 #define PRIMARY_OVL_EXT_LAYER_NR 6L
-
-#define EXTERNAL_OVL_EXT_LAYER_NR 6L
 
 #define SPR_TYPE_FENCE_MAX 5
 
@@ -487,6 +485,10 @@ enum MTK_CRTC_PROP {
 	CRTC_PROP_BL_SYNC_GAMMA_GAIN,
 	CRTC_PROP_DYNAMIC_WCG_OFF,
 	CRTC_PROP_WCG_BY_COLOR_MODE,
+#ifdef CONFIG_MI_DISP_FOD_SYNC
+	/*MI FOD SYNC*/
+	CRTC_PROP_MI_FOD_SYNC_INFO,
+#endif
 	CRTC_PROP_MAX,
 };
 
@@ -741,14 +743,6 @@ struct disp_ccorr_config {
 	int mode;
 	int color_matrix[16];
 	bool featureFlag;
-};
-
-struct disp_ccorr_config_backup {
-	int mode;
-	int color_matrix[16];
-	bool featureFlag;
-	bool linear;
-	bool update;
 };
 
 struct user_cwb_image {
@@ -1146,8 +1140,6 @@ struct mtk_drm_crtc {
 	unsigned int usage_ovl_weight[OVL_LAYER_NR];
 
 	bool is_plane0_updated;
-
-	struct disp_ccorr_config_backup ccorr_config_backup;
 };
 
 enum BL_GAMMA_GAIN {
@@ -1526,6 +1518,6 @@ void mtk_crtc_addon_connector_rst(struct drm_crtc *crtc, struct cmdq_pkt *cmdq_h
 void mtk_crtc_default_path_rst(struct drm_crtc *crtc, struct cmdq_pkt *cmdq_handle);
 void mtk_crtc_rst_module(struct drm_crtc *crtc);
 void mtk_crtc_init_hrt_usage(struct drm_crtc *crtc);
-
+int esd_restore_backlight(struct drm_crtc *crtc);
 
 #endif /* MTK_DRM_CRTC_H */

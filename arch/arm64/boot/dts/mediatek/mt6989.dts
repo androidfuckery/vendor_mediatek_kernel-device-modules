@@ -1534,10 +1534,13 @@
 		interrupt-names = "rcs_irq","rcs_irq_p","pmif_irq","spmi_nack_irq","pmif_p_irq","spmi_p_nack_irq";
 		interrupt-controller;
 		#interrupt-cells = <1>;
-		irq-event-en = <0xc0000000 0x0 0x0 0x1f800000 0x0>;
+		irq-event-en = <0xc0000000 0x200 0x0 0x1f800000 0x0>;
+		irq-event-en-p = <0xc0000000 0x130c 0x0 0x0 0x0>;
 		spmi-dev-mask = <0x85e0>;
 		#address-cells = <2>;
 		#size-cells = <0>;
+		hwinf-err-irq-idx = <0x20 0x2e>;
+		swinf-err-irq-idx = <0x6b 0x70>;
 	};
 
 	spmi_pmif_mpu: spmi-pmif-mpu@1cc04900 {
@@ -1951,12 +1954,6 @@
 
 	page_based_v2: page-based-v2-enabled {
 		compatible = "mediatek,page-based-v2-enabled";
-	};
-
-	teeperf {
-		compatible = "mediatek,teeperf";
-		cpu-type = <1>; /* 1: CPU_V9_TYPE, 2: CPU_V8_TYPE */
-		cpu-map = <1>; /* 1: CPU_4_3_1_MAP, 2: CPU_6_2_MAP */
 	};
 
 	mtee_svp: mtee-svp {
@@ -4906,7 +4903,7 @@
 			mpu-base-clear = <1>;
 		};
 
-		slc-parity@10342000 {
+		slcparity: slc-parity@10342000 {
 			compatible = "mediatek,common-slc-parity";
 			reg = <0 0x10342000 0 0x1000>,
 				<0 0x10343000 0 0x1000>;
@@ -4916,6 +4913,7 @@
 			cs-num = <2>;
 			chn-num = <2>;
 			clear = <0x014>;
+			assert = <0>;
 		};
 
 		ktf-emislc-test {

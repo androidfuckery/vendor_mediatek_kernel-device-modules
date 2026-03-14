@@ -655,6 +655,10 @@ static irqreturn_t drv3_isr0(int irq, void *data)
 	/* clear IP busy register wake up cpu case */
 	ccci_drv_clear_ip_busy();
 
+	if (atomic_read(&dpmaif_ctl->wakeup_src) == 1)
+		CCCI_NOTICE_LOG(0, TAG, "[%s] wake up by MD0 HIF L2(%x/%x)(%x/%x)!\n",
+			__func__, L2TISAR0, L2TIMR0, L2RISAR0, L2RIMR0);
+
 	check_ul_mask_state_register(L2TIMR0);
 	check_dl_mask_state_register(L2RIMR0);
 
@@ -742,6 +746,10 @@ static irqreturn_t drv3_isr1(int irq, void *data)
 	/* clear IP busy register wake up cpu case */
 	ccci_drv_clear_ip_busy();
 
+	if (atomic_read(&dpmaif_ctl->wakeup_src) == 1)
+		CCCI_NOTICE_LOG(0, TAG, "[%s] wake up by MD0 HIF L2(%x/%x)!\n",
+			__func__, L2RISAR0, L2RIMR0);
+
 	check_dl_mask_state_register(L2RIMR0);
 
 	/* RX interrupt */
@@ -790,6 +798,10 @@ static irqreturn_t drv3_isr(int irq, void *data)
 
 	/* clear IP busy register wake up cpu case */
 	ccci_drv_clear_ip_busy();
+
+	if (atomic_read(&dpmaif_ctl->wakeup_src) == 1)
+		CCCI_NOTICE_LOG(0, TAG, "[%s] wake up by MD0 HIF L2(%x/%x)(%x/%x)!\n",
+			__func__, L2TISAR0, L2TIMR0, L2RISAR0, L2RIMR0);
 
 	check_ul_mask_state_register(L2TIMR0);
 	check_dl_mask_state_register(L2RIMR0);

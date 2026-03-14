@@ -20,9 +20,9 @@
 
 #define LOGGER_DEBUG 0
 #if (LOGGER_DEBUG == 1)
-#define LOGGER_D(x...)		pr_debug(x)
+#define LOGGER_D(...)		pr_debug(...)
 #else
-#define LOGGER_D(x...)
+#define LOGGER_D(...)
 #endif
 
 #define ROUNDUP(a, b)		(((a) + ((b)-1)) & ~((b)-1))
@@ -291,6 +291,9 @@ static inline ssize_t log_enable_store(struct device *dev,
 		return -EINVAL;
 
 	mutex_lock(&logger_lock);
+	logger_enable = enable;
+	logger_ctrl->enable = enable;
+
 	do {
 		retry_count--;
 		ret = scp_send_message(SCP_AUDIO_IPI_LOGGER_ENABLE, &enable, sizeof(enable), 20, 0);
@@ -298,10 +301,7 @@ static inline ssize_t log_enable_store(struct device *dev,
 			usleep_range(1000, 1500);
 	} while ((retry_count > 0) && (ret != ADSP_IPI_DONE));
 
-	if (ret == ADSP_IPI_DONE) {
-		logger_enable = enable;
-		logger_ctrl->enable = enable;
-	} else
+	if (ret != ADSP_IPI_DONE)
 		pr_err("%s scp_send_message failed, ret = %d\n", __func__, ret);
 
 	mutex_unlock(&logger_lock);

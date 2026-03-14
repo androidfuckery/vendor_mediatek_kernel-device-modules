@@ -29,6 +29,11 @@
 #include "mmqos-vcp.h"
 #include "mmqos-vcp-memory.h"
 #include <linux/delay.h>
+#include <mtk-smi-dbg.h>
+
+#if IS_ENABLED(CONFIG_MTK_DVFSRC)
+#include "dvfsrc-exp.h"
+#endif /* CONFIG_MTK_DVFSRC */
 
 #if IS_ENABLED(CONFIG_MTK_EMI)
 #include <soc/mediatek/emi.h>
@@ -70,6 +75,14 @@
 
 #define IS_ON_TABLE		(true)
 
+#define mmqos_debug_dump_line(file, fmt, args...)	\
+({							\
+	if (file)					\
+		seq_printf(file, fmt, ##args);		\
+	else						\
+		pr_notice(fmt, ##args);		\
+})
+
 enum mmqos_rw_type {
 	path_no_type = 0,
 	path_write,		//1
@@ -108,6 +121,28 @@ struct chn_bw_record {
 	u32 srt_w_bw[MAX_RECORD_COMM_NUM][MMQOS_COMM_CHANNEL_NUM][RECORD_NUM];
 	u32 hrt_r_bw[MAX_RECORD_COMM_NUM][MMQOS_COMM_CHANNEL_NUM][RECORD_NUM];
 	u32 hrt_w_bw[MAX_RECORD_COMM_NUM][MMQOS_COMM_CHANNEL_NUM][RECORD_NUM];
+	u64 urate_time[MAX_RECORD_COMM_NUM][MMQOS_COMM_CHANNEL_NUM][RECORD_NUM];
+	u32 urate_srt_r_bw[MAX_RECORD_COMM_NUM][MMQOS_COMM_CHANNEL_NUM][RECORD_NUM];
+	u32 urate_srt_w_bw[MAX_RECORD_COMM_NUM][MMQOS_COMM_CHANNEL_NUM][RECORD_NUM];
+	u32 urate_hrt_r_bw[MAX_RECORD_COMM_NUM][MMQOS_COMM_CHANNEL_NUM][RECORD_NUM];
+	u32 urate_hrt_w_bw[MAX_RECORD_COMM_NUM][MMQOS_COMM_CHANNEL_NUM][RECORD_NUM];
+};
+
+struct emi_chn_bw_record {
+	u8 idx[MAX_RECORD_COMM_NUM][MMQOS_COMM_CHANNEL_NUM];
+	u64 time[MAX_RECORD_COMM_NUM][MMQOS_COMM_CHANNEL_NUM][RECORD_NUM];
+	u32 emi_srt_bw[MAX_RECORD_COMM_NUM][MMQOS_COMM_CHANNEL_NUM][RECORD_NUM];
+	u32 emi_hrt_bw[MAX_RECORD_COMM_NUM][MMQOS_COMM_CHANNEL_NUM][RECORD_NUM];
+	u32 urate_emi_srt_bw[MAX_RECORD_COMM_NUM][MMQOS_COMM_CHANNEL_NUM][RECORD_NUM];
+	u32 urate_emi_hrt_bw[MAX_RECORD_COMM_NUM][MMQOS_COMM_CHANNEL_NUM][RECORD_NUM];
+};
+
+struct emi_freq_record {
+	u8 idx[MAX_RECORD_COMM_NUM];
+	u64 time[MAX_RECORD_COMM_NUM][RECORD_NUM];
+	u32 peak_emi_freq[MAX_RECORD_COMM_NUM][RECORD_NUM];
+	u32 pmqos_bw6[MAX_RECORD_COMM_NUM][RECORD_NUM];
+	u32 dvfsrc_level[MAX_RECORD_COMM_NUM][RECORD_NUM];
 };
 
 struct larb_port_bw_record {
@@ -122,6 +157,8 @@ struct larb_port_bw_record {
 
 struct comm_port_bw_record *comm_port_bw_rec;
 struct chn_bw_record *chn_bw_rec;
+struct emi_chn_bw_record *emi_chn_bw_rec;
+struct emi_freq_record *emi_freq_rec;
 struct larb_port_bw_record *larb_port_bw_rec;
 
 struct larb_port_node {
@@ -138,6 +175,7 @@ struct mtk_mmqos {
 	struct device *dev;
 	struct icc_provider prov;
 	struct notifier_block nb;
+	struct notifier_block nb_smi;
 	struct list_head comm_list;
 	u32 max_ratio;
 	u32 max_disp_ostdl;
@@ -153,10 +191,12 @@ struct mtk_mmqos {
 	u32 apmcu_off_bw_offset;
 	void __iomem *mminfra_base;
 	struct mutex bw_lock;
+	void __iomem *dvfsrc_level_base;
 };
 
 u32 mmqos_state;
 u32 log_level;
+int opp_cnt;
 
 static struct mtk_mmqos *gmmqos;
 static struct mmqos_hrt *g_hrt;
@@ -189,6 +229,47 @@ u32 on_reg_value[MAX_REG_VALUE_NUM];
 u32 off_reg_value[MAX_REG_VALUE_NUM];
 
 u32 freq_mode = BY_REGULATOR;
+
+static void record_chn_bw_urate(u32 comm_id, u32 chnn_id, u32 srt_r, u32 srt_w,
+	u32 hrt_r, u32 hrt_w, u32 record_idx)
+{
+	chn_bw_rec->urate_time[comm_id][chnn_id][record_idx] = sched_clock();
+	chn_bw_rec->urate_srt_r_bw[comm_id][chnn_id][record_idx] = srt_r;
+	chn_bw_rec->urate_srt_w_bw[comm_id][chnn_id][record_idx] = srt_w;
+	chn_bw_rec->urate_hrt_r_bw[comm_id][chnn_id][record_idx] = hrt_r;
+	chn_bw_rec->urate_hrt_w_bw[comm_id][chnn_id][record_idx] = hrt_w;
+}
+
+static void record_emi_bw(u32 comm_id, u32 chnn_id, u32 emi_srt_bw, u32 emi_hrt_bw,
+	u32 urate_emi_srt_bw, u32 urate_emi_hrt_bw)
+{
+	u32 idx;
+
+	idx = emi_chn_bw_rec->idx[comm_id][chnn_id];
+	emi_chn_bw_rec->time[comm_id][chnn_id][idx] = sched_clock();
+	emi_chn_bw_rec->emi_srt_bw[comm_id][chnn_id][idx] = emi_srt_bw;
+	emi_chn_bw_rec->emi_hrt_bw[comm_id][chnn_id][idx] = emi_hrt_bw;
+	emi_chn_bw_rec->urate_emi_srt_bw[comm_id][chnn_id][idx] = urate_emi_srt_bw;
+	emi_chn_bw_rec->urate_emi_hrt_bw[comm_id][chnn_id][idx] = urate_emi_hrt_bw;
+	emi_chn_bw_rec->idx[comm_id][chnn_id] = (idx + 1) % RECORD_NUM;
+}
+
+static void record_emi_freq(u32 comm_id, u32 peak_emi_freq)
+{
+	u32 idx, dvfsrc_level_val = 0, pmqos_bw6_val = 0;
+
+	if (gmmqos->dvfsrc_level_base) {
+		dvfsrc_level_val = readl(gmmqos->dvfsrc_level_base + 0x5f0);
+		pmqos_bw6_val = readl(gmmqos->dvfsrc_level_base + 0x1f4);
+	}
+
+	idx = emi_freq_rec->idx[comm_id];
+	emi_freq_rec->time[comm_id][idx] = sched_clock();
+	emi_freq_rec->peak_emi_freq[comm_id][idx] = peak_emi_freq;
+	emi_freq_rec->pmqos_bw6[comm_id][idx] = pmqos_bw6_val;
+	emi_freq_rec->dvfsrc_level[comm_id][idx] = dvfsrc_level_val;
+	emi_freq_rec->idx[comm_id] = (idx + 1) % RECORD_NUM;
+}
 
 static void mmqos_update_comm_bw(struct device *dev,
 	u32 comm_port, u32 freq, u64 mix_bw, u64 bw_peak, bool qos_bound, bool max_bwl)
@@ -383,8 +464,12 @@ static void set_total_bw_to_emi(struct common_node *comm_node, u32 peak_emi_bw)
 
 	MMQOS_SYSTRACE_BEGIN("to EMI avg %d peak_emi_bw %u peak %d\n",
 		icc_to_MBps(avg_bw), peak_emi_bw, icc_to_MBps(peak_bw));
-	icc_set_bw(comm_node->icc_path, avg_bw, MBps_to_icc(peak_emi_bw));
+	icc_set_bw(comm_node->icc_path, avg_bw, peak_emi_bw);
 	icc_set_bw(comm_node->icc_hrt_path, peak_bw, 0);
+
+	if (mmqos_state & DYNA_URATE_ENABLE)
+		record_emi_freq(comm_id, peak_emi_bw);
+
 	MMQOS_SYSTRACE_END();
 }
 
@@ -400,7 +485,7 @@ static u32 get_dyna_urate_from_chnn_diff(u32 chn0_bw, u32 chn1_bw)
 	return urate;
 }
 
-static u32 get_max_channel_bw_in_common(u32 comm_id)
+static u32 get_max_channel_bw_in_common(u32 comm_id, u32 record_idx)
 {
 	u32 max_bw = 0, i;
 	u32 final_h_r_bw, final_h_w_bw, final_s_r_bw, final_s_w_bw;
@@ -470,10 +555,17 @@ static u32 get_max_channel_bw_in_common(u32 comm_id)
 			max_bw = max_t(u32, max_bw, final_s_r_bw);
 			max_bw = max_t(u32, max_bw, final_h_w_bw);
 			max_bw = max_t(u32, max_bw, final_s_w_bw);
+
 			if (log_level & 1 << log_comm_freq)
 				MMQOS_DBG("comm(%d) chn=%d max_bw=%u apply urate s_r=%u h_r=%u, s_w=%u h_w=%u\n",
 					comm_id, i, max_bw, final_s_r_bw, final_h_r_bw,
 					final_s_w_bw, final_h_w_bw);
+			record_chn_bw_urate(comm_id, i,
+				final_s_r_bw,
+				final_s_w_bw,
+				final_h_r_bw,
+				final_h_w_bw,
+				record_idx);
 			if (mmqos_met_enabled())
 				trace_mmqos__chn_bw(comm_id, i,
 					icc_to_MBps(final_s_r_bw),
@@ -493,19 +585,19 @@ static u32 get_peak_emi_freq(u32 emi_bw)
 {
 	u32 step, emi_freq = 0;
 
-	if (emi_bw == 0)
+	if (emi_bw == 0 || opp_cnt < 0)
 		return 0;
 
 	emi_freq = emi_bw * 8 / 128 / 1000; //MHZ
 
-	for (step = 0; step < MMQOS_MAX_DVFS_STEP_NUM; step++) {
+	for (step = 0; step < opp_cnt; step++) {
 		if (emi_freq > dramc_freq_mapping_table[step][1] || !dramc_freq_mapping_table[step][1])
 			break;
 	}
 
 	if (step > 0)
-		return dramc_freq_mapping_table[step - 1][0];
-	return dramc_freq_mapping_table[step][0];
+		return dramc_freq_mapping_table[step - 1][2];
+	return dramc_freq_mapping_table[step][2];
 }
 
 static u32 get_max_channel_bw_in_emi(u32 comm_id)
@@ -524,6 +616,7 @@ static u32 get_max_channel_bw_in_emi(u32 comm_id)
 		pr_notice("%s comm(%d) hrt_urate=%d srt_urate=%d\n",
 			__func__, comm_id, hrt_urate, srt_urate);
 	}
+
 	for (i = 0; i < MMQOS_COMM_CHANNEL_NUM; i++) {
 		final_h_bw = emi_chn_hrt_bw[comm_id][i] * 100 / hrt_urate;
 		final_s_bw = emi_chn_srt_bw[comm_id][i] * 100 / srt_urate;
@@ -532,6 +625,12 @@ static u32 get_max_channel_bw_in_emi(u32 comm_id)
 			pr_notice("%s comm(%d) chn=%d apply urate h_bw=%u s_bw=%u (KB/s)\n",
 				__func__, comm_id, i, final_h_bw, final_s_bw);
 
+		record_emi_bw(comm_id, i,
+			emi_chn_srt_bw[comm_id][i],
+			emi_chn_hrt_bw[comm_id][i],
+			final_s_bw,
+			final_h_bw);
+
 		max_bw = max_t(u32, max_bw, final_h_bw);
 		max_bw = max_t(u32, max_bw, final_s_bw);
 	}
@@ -539,16 +638,16 @@ static u32 get_max_channel_bw_in_emi(u32 comm_id)
 	return max_bw;
 }
 
-static u32 get_max_channel_bw(u32 comm_id, u32 freq_mode)
+static u32 get_max_channel_bw(u32 comm_id, u32 freq_mode, u32 record_idx)
 {
 	u32 max_bw = 0, comm_bw, i;
 
 	if (freq_mode == BY_REGULATOR)
-		return get_max_channel_bw_in_common(comm_id);
+		return get_max_channel_bw_in_common(comm_id, record_idx);
 
 	// BY_MMDVFS
 	for (i = 0; i < MMQOS_MAX_COMM_NUM; i++) {
-		comm_bw = get_max_channel_bw_in_common(i);
+		comm_bw = get_max_channel_bw_in_common(i, record_idx);
 		max_bw = max_t(u32, max_bw, comm_bw);
 	}
 
@@ -819,9 +918,9 @@ static void set_freq_by_vmmrc(const u32 comm_id)
 		set_channel_bw_to_hw();
 }
 
-static void set_comm_icc_bw(struct common_node *comm_node)
+static void set_comm_icc_bw(struct common_node *comm_node, u32 record_idx)
 {
-	u32 max_bw = 0, emi_freq = 0, peak_emi_freq = 0, emi_bw = 0;
+	u32 max_bw = 0, peak_emi_freq = 0, emi_bw = 0;
 	unsigned long smi_clk = 0;
 	u32 comm_id, i, j;
 
@@ -840,7 +939,7 @@ static void set_comm_icc_bw(struct common_node *comm_node)
 	}
 
 	if (freq_mode == BY_REGULATOR || freq_mode == BY_MMDVFS) {
-		max_bw = get_max_channel_bw(comm_id, freq_mode);
+		max_bw = get_max_channel_bw(comm_id, freq_mode, record_idx);
 		if (mmqos_state & DYNA_URATE_ENABLE) {
 			emi_bw = get_max_channel_bw_in_emi(comm_id);
 			peak_emi_freq = get_peak_emi_freq(emi_bw);
@@ -853,8 +952,8 @@ static void set_comm_icc_bw(struct common_node *comm_node)
 
 		if (log_level & 1 << log_comm_freq) {
 			dev_notice(comm_node->comm_dev,
-				"comm(%d) max_bw=%u smi_clk=%lu freq_mode=%d emi_freq=%u peak_emi_bw=%u\n",
-				comm_id, max_bw, smi_clk, freq_mode, emi_freq, peak_emi_freq);
+				"comm(%d) max_bw=%u smi_clk=%lu freq_mode=%d emi_bw=%u peak_emi_bw=%u\n",
+				comm_id, max_bw, smi_clk, freq_mode, emi_bw, peak_emi_freq);
 		}
 
 		if (comm_node->comm_dev && smi_clk != comm_node->smi_clk) {
@@ -935,7 +1034,8 @@ static void record_comm_port_bw(u32 comm_id, u32 port_id, u32 larb_id,
 	comm_port_bw_rec->idx[comm_id][port_id] = (idx + 1) % RECORD_NUM;
 }
 
-static void record_chn_bw(u32 comm_id, u32 chnn_id, u32 srt_r, u32 srt_w, u32 hrt_r, u32 hrt_w)
+static u32 record_chn_bw(u32 comm_id, u32 chnn_id, u32 srt_r, u32 srt_w,
+	u32 hrt_r, u32 hrt_w)
 {
 	u32 idx;
 
@@ -946,6 +1046,8 @@ static void record_chn_bw(u32 comm_id, u32 chnn_id, u32 srt_r, u32 srt_w, u32 hr
 	chn_bw_rec->hrt_r_bw[comm_id][chnn_id][idx] = hrt_r;
 	chn_bw_rec->hrt_w_bw[comm_id][chnn_id][idx] = hrt_w;
 	chn_bw_rec->idx[comm_id][chnn_id] = (idx + 1) % RECORD_NUM;
+
+	return idx;
 }
 
 static void record_larb_port_bw_ostdl(u32 larb_id, u32 port_id, u32 avg_bw, u32 peak_bw, u32 mix_bw, u8 ostdl)
@@ -1071,7 +1173,7 @@ static int mtk_mmqos_set(struct icc_node *src, struct icc_node *dst)
 	struct common_node *comm_node;
 	struct mtk_mmqos *mmqos = container_of(dst->provider,
 					struct mtk_mmqos, prov);
-	u32 value = 1;
+	u32 value = 1, record_idx = -1;
 	u32 comm_id, chnn_id, port_id, trace_comm_id, trace_chnn_id;
 	const char *r_w_type = "w";
 
@@ -1087,11 +1189,11 @@ static int mtk_mmqos_set(struct icc_node *src, struct icc_node *dst)
 			chnn_id -= 1;
 			update_channel_bw(comm_id, chnn_id, src);
 
-			record_chn_bw(comm_id, chnn_id,
-				chn_srt_r_bw[comm_id][chnn_id],
-				chn_srt_w_bw[comm_id][chnn_id],
-				chn_hrt_r_bw[comm_id][chnn_id],
-				chn_hrt_w_bw[comm_id][chnn_id]);
+			record_idx = record_chn_bw(comm_id, chnn_id,
+					chn_srt_r_bw[comm_id][chnn_id],
+					chn_srt_w_bw[comm_id][chnn_id],
+					chn_hrt_r_bw[comm_id][chnn_id],
+					chn_hrt_w_bw[comm_id][chnn_id]);
 			if (mmqos_met_enabled())
 				trace_mmqos__chn_bw(comm_id, chnn_id,
 					icc_to_MBps(chn_srt_r_bw[comm_id][chnn_id]),
@@ -1106,7 +1208,7 @@ static int mtk_mmqos_set(struct icc_node *src, struct icc_node *dst)
 		if (!comm_node)
 			break;
 		if (mmqos_state & DVFSRC_ENABLE) {
-			set_comm_icc_bw(comm_node);
+			set_comm_icc_bw(comm_node, record_idx);
 			update_hrt_bw(mmqos);
 		}
 		//queue_work(mmqos->wq, &comm_node->work);
@@ -1576,13 +1678,58 @@ static void chn_bw_dump(struct seq_file *file, u32 comm_id, u32 chnn_id, u32 i)
 
 	ts = chn_bw_rec->time[comm_id][chnn_id][i];
 	rem_nsec = do_div(ts, 1000000000);
-	seq_printf(file, "[%5llu.%06llu] comm%d_%d %8d %8d %8d %8d\n",
+	mmqos_debug_dump_line(file, "[%5llu.%06llu] comm%d_%d %8d %8d %8d %8d orig\n",
 		(u64)ts, rem_nsec / 1000,
 		comm_id, chnn_id,
 		icc_to_MBps(chn_bw_rec->srt_r_bw[comm_id][chnn_id][i]),
 		icc_to_MBps(chn_bw_rec->srt_w_bw[comm_id][chnn_id][i]),
 		icc_to_MBps(chn_bw_rec->hrt_r_bw[comm_id][chnn_id][i]),
 		icc_to_MBps(chn_bw_rec->hrt_w_bw[comm_id][chnn_id][i]));
+
+	if (mmqos_state & DYNA_URATE_ENABLE) {
+		ts = chn_bw_rec->urate_time[comm_id][chnn_id][i];
+		rem_nsec = do_div(ts, 1000000000);
+		mmqos_debug_dump_line(file, "[%5llu.%06llu] comm%d_%d %8d %8d %8d %8d urate\n",
+			(u64)ts, rem_nsec / 1000,
+			comm_id, chnn_id,
+			icc_to_MBps(chn_bw_rec->urate_srt_r_bw[comm_id][chnn_id][i]),
+			icc_to_MBps(chn_bw_rec->urate_srt_w_bw[comm_id][chnn_id][i]),
+			icc_to_MBps(chn_bw_rec->urate_hrt_r_bw[comm_id][chnn_id][i]),
+			icc_to_MBps(chn_bw_rec->urate_hrt_w_bw[comm_id][chnn_id][i]));
+	}
+}
+
+static void chn_emi_dump(struct seq_file *file, u32 comm_id, u32 chnn_id, u32 i)
+{
+	u64 ts;
+	u64 rem_nsec;
+
+	ts = emi_chn_bw_rec->time[comm_id][chnn_id][i];
+	rem_nsec = do_div(ts, 1000000000);
+
+	mmqos_debug_dump_line(file, "[%5llu.%06llu] comm%d_%d %8d %8d %8d %8d emi bw\n",
+		(u64)ts, rem_nsec / 1000,
+		comm_id, chnn_id,
+		icc_to_MBps(emi_chn_bw_rec->emi_srt_bw[comm_id][chnn_id][i]),
+		icc_to_MBps(emi_chn_bw_rec->emi_hrt_bw[comm_id][chnn_id][i]),
+		icc_to_MBps(emi_chn_bw_rec->urate_emi_srt_bw[comm_id][chnn_id][i]),
+		icc_to_MBps(emi_chn_bw_rec->urate_emi_hrt_bw[comm_id][chnn_id][i]));
+}
+
+static void chn_emi_freq_dump(struct seq_file *file, u32 comm_id, u32 i)
+{
+	u64 ts;
+	u64 rem_nsec;
+
+	ts = emi_freq_rec->time[comm_id][i];
+	rem_nsec = do_div(ts, 1000000000);
+
+	mmqos_debug_dump_line(file, "[%5llu.%06llu] comm%d peak_emi_freq=%u pmqos_bw6=%#x dvfsrc_level=%#x\n",
+			(u64)ts, rem_nsec / 1000,
+			comm_id,
+			emi_freq_rec->peak_emi_freq[comm_id][i],
+			emi_freq_rec->pmqos_bw6[comm_id][i],
+			emi_freq_rec->dvfsrc_level[comm_id][i]);
 }
 
 static void hrt_bw_dump(struct seq_file *file, u32 i)
@@ -1642,12 +1789,88 @@ static void chn_bw_full_dump(struct seq_file *file, u32 comm_id, u32 chnn_id)
 	u32 i, start;
 
 	start = chn_bw_rec->idx[comm_id][chnn_id];
+
 	for (i = start; i < RECORD_NUM; i++)
 		chn_bw_dump(file, comm_id, chnn_id, i);
 
 	for (i = 0; i < start; i++)
 		chn_bw_dump(file, comm_id, chnn_id, i);
+}
 
+static void chn_bw_dump_by_comm(struct seq_file *file, u32 comm_id)
+{
+	u32 chnn_id = 0;
+
+	for (chnn_id = 0; chnn_id < MMQOS_COMM_CHANNEL_NUM; chnn_id++)
+		chn_bw_full_dump(file, comm_id, chnn_id);
+}
+
+static void chn_bw_all_dump(struct seq_file *file)
+{
+	u32 comm_id = 0;
+	struct common_node *comm_node;
+
+	mmqos_debug_dump_line(file, "MMQoS Channel BW Dump: %8s %8s %8s %8s\n",
+		"s_r", "s_w", "h_r", "h_w");
+	list_for_each_entry(comm_node, &gmmqos->comm_list, list) {
+		comm_id = MASK_8(comm_node->base->icc_node->id);
+		chn_bw_dump_by_comm(file, comm_id);
+	}
+}
+
+static void emi_chn_bw_dump(struct seq_file *file, u32 comm_id, u32 chnn_id)
+{
+	u32 i, start;
+
+	start = emi_chn_bw_rec->idx[comm_id][chnn_id];
+
+	for (i = start; i < RECORD_NUM; i++)
+		chn_emi_dump(file, comm_id, chnn_id, i);
+
+	for (i = 0; i < start; i++)
+		chn_emi_dump(file, comm_id, chnn_id, i);
+}
+
+static void emi_bw_freq_dump(struct seq_file *file)
+{
+	u32 i, start;
+	u32 chnn_id = 0;
+	u32 comm_id = 0;
+	struct common_node *comm_node;
+
+	if (mmqos_state & DYNA_URATE_ENABLE) {
+		list_for_each_entry(comm_node, &gmmqos->comm_list, list) {
+			comm_id = MASK_8(comm_node->base->icc_node->id);
+			for (chnn_id = 0; chnn_id < MMQOS_COMM_CHANNEL_NUM; chnn_id++)
+				emi_chn_bw_dump(file, comm_id, chnn_id);
+		}
+
+		list_for_each_entry(comm_node, &gmmqos->comm_list, list) {
+			comm_id = MASK_8(comm_node->base->icc_node->id);
+			start = emi_freq_rec->idx[comm_id];
+
+			for (i = start; i < RECORD_NUM; i++)
+				chn_emi_freq_dump(file, comm_id, i);
+
+			for (i = 0; i < start; i++)
+				chn_emi_freq_dump(file, comm_id, i);
+		}
+	}
+}
+
+#define UNDERRUN_CALLER		"dsi-underrun"
+#define SMI_UT_CALLER		"SMI UT"
+
+static int comm_full_dump(struct notifier_block *nb_smi,
+		unsigned long value, void *data)
+{
+	if (strncmp((char *) data, UNDERRUN_CALLER, strlen(UNDERRUN_CALLER)) == 0 ||
+		strncmp((char *) data, SMI_UT_CALLER, strlen(SMI_UT_CALLER)) == 0) {
+		chn_bw_all_dump(NULL);
+		emi_bw_freq_dump(NULL);
+	}
+
+	return 0;
 }
 
 static void hrt_bw_full_dump(struct seq_file *file)
@@ -1716,7 +1939,7 @@ static const struct proc_ops mmqos_last_debug_fops = {
 
 static int mmqos_bw_dump(struct seq_file *file, void *data)
 {
-	u32 comm_id = 0, chnn_id = 0, port_id = 0, larb_id = 0;
+	u32 comm_id = 0, port_id = 0, larb_id = 0;
 
 	seq_printf(file, "MMQoS HRT BW Dump: %8s %8s %8s\n",
 		"avail", "cam_max", "cam_hrt");
@@ -1725,12 +1948,8 @@ static int mmqos_bw_dump(struct seq_file *file, void *data)
 	seq_printf(file, "MMQoS CAM HRT BW Dump:      %8s\n", "cam_max");
 	cam_hrt_bw_full_dump(file);
 
-	seq_printf(file, "MMQoS Channel BW Dump: %8s %8s %8s %8s\n",
-		"s_r", "s_w", "h_r", "h_w");
-	for (comm_id = 0; comm_id < MAX_RECORD_COMM_NUM; comm_id++) {
-		for (chnn_id = 0; chnn_id < MMQOS_COMM_CHANNEL_NUM; chnn_id++)
-			chn_bw_full_dump(file, comm_id, chnn_id);
-	}
+	chn_bw_all_dump(file);
+	emi_bw_freq_dump(file);
 
 	seq_printf(file, "MMQoS Common Port BW Dump:        %8s %8s %8s %8s\n",
 		"avg", "peak", "l_avg", "l_peak");
@@ -1782,6 +2001,7 @@ int mtk_mmqos_probe(struct platform_device *pdev)
 	struct proc_dir_entry *dir, *proc, *last_proc;
 	phys_addr_t pa = 0ULL;
 	unsigned long va;
+	u32 dvfsrc_level_pa, dvfsrc_opp_thrs;
 
 	mmqos = devm_kzalloc(&pdev->dev, sizeof(*mmqos), GFP_KERNEL);
 	if (!mmqos)
@@ -1818,6 +2038,16 @@ int mtk_mmqos_probe(struct platform_device *pdev)
 	larb_port_bw_rec = devm_kzalloc(&pdev->dev,
 		sizeof(*larb_port_bw_rec), GFP_KERNEL);
 	if (!larb_port_bw_rec)
+		return -ENOMEM;
+
+	emi_chn_bw_rec = devm_kzalloc(&pdev->dev,
+		sizeof(*emi_chn_bw_rec), GFP_KERNEL);
+	if (!emi_chn_bw_rec)
+		return -ENOMEM;
+
+	emi_freq_rec = devm_kzalloc(&pdev->dev,
+		sizeof(*emi_freq_rec), GFP_KERNEL);
+	if (!emi_freq_rec)
 		return -ENOMEM;
 
 	of_for_each_phandle(
@@ -2053,6 +2283,11 @@ int mtk_mmqos_probe(struct platform_device *pdev)
 	of_property_read_u32(pdev->dev.of_node, "mmqos-log-level", &log_level);
 	pr_notice("[mmqos] mmqos log level: %#x\n", log_level);
 
+	if (!of_property_read_u32(pdev->dev.of_node, "dvfsrc-level-base", &dvfsrc_level_pa)) {
+		pr_notice("dvfsrc level hex base:%#x", dvfsrc_level_pa);
+		mmqos->dvfsrc_level_base = ioremap(dvfsrc_level_pa, 0x1000);
+	}
+
 	for (i = 0 ; i < MMQOS_MAX_DISP_VIRT_LARB_NUM ; i++)
 		mmqos->disp_virt_larbs[i] = mmqos_desc->disp_virt_larbs[i];
 
@@ -2087,19 +2322,30 @@ int mtk_mmqos_probe(struct platform_device *pdev)
 		MMQOS_ERR("dramc or emi not ready, cannot get max frequency or channel count");
 	MMQOS_DBG("max_freq:%d, channel count:%d", max_freq, chn_cnt);
 
-	for (step = 0; step < MMQOS_MAX_DVFS_STEP_NUM; step++) {
-		dram_freq = mtk_dramc_get_steps_freq(step);
-		dramc_freq_mapping_table[step][0] = dram_freq;
-		if (dram_freq < 0) {
-			dramc_freq_mapping_table[step - 1][1] *= 2;
-			dramc_freq_mapping_table[step][1] = 0;
-		} else if (dram_freq > 6000)
-			dramc_freq_mapping_table[step][1] = 728;
-		else
-			dramc_freq_mapping_table[step][1] = dram_freq / 8;
-		MMQOS_DBG("dram_opp_table step %d: DRAM freq:%d emiclk:%d",
-			step, dramc_freq_mapping_table[step][0], dramc_freq_mapping_table[step][1]);
+	if (mmqos_state & DYNA_URATE_ENABLE) {
+		opp_cnt = of_count_phandle_with_args(pdev->dev.of_node, "required-opps", NULL);
+		if (opp_cnt < 0)
+			MMQOS_ERR("fail to get required_opps count from dts.");
+		else {
+			for (step = 0; step < opp_cnt; step++) {
+				dram_freq = mtk_dramc_get_steps_freq(step);
+				dvfsrc_opp_thrs = dvfsrc_get_required_opp_peak_bw(pdev->dev.of_node, step);
+				dramc_freq_mapping_table[step][0] = dram_freq;
+				dramc_freq_mapping_table[step][2] = dvfsrc_opp_thrs;
+				if (dram_freq < 0) {
+					dramc_freq_mapping_table[step - 1][1] *= 2;
+					dramc_freq_mapping_table[step][1] = 0;
+				} else if (dram_freq > 6000)
+					dramc_freq_mapping_table[step][1] = 728;
+				else
+					dramc_freq_mapping_table[step][1] = dram_freq / 8;
+				MMQOS_DBG("dram_opp_table step %d: DRAM freq:%d emiclk:%d opp thrs:%d",
+					step, dramc_freq_mapping_table[step][0],
+					dramc_freq_mapping_table[step][1], dramc_freq_mapping_table[step][2]);
+			}
+		}
 	}
+
 #endif
 	MMQOS_DBG("hrt_total_bw: %d", hrt->hrt_total_bw);
 
@@ -2108,6 +2354,9 @@ int mtk_mmqos_probe(struct platform_device *pdev)
 	g_hrt = hrt;
 	mmqos->nb.notifier_call = update_mm_clk;
 	register_mmdvfs_notifier(&mmqos->nb);
+	mmqos->nb_smi.notifier_call = comm_full_dump;
+	mtk_smi_dbg_register_notifier(&mmqos->nb_smi);
+
 	ret = mtk_mmqos_register_hrt_sysfs(&pdev->dev);
 	if (ret)
 		dev_notice(&pdev->dev, "sysfs create fail\n");

@@ -1837,58 +1837,63 @@ static void spmi_dump_pmif_all_reg_d(struct seq_file *m)
 	seq_puts(m, "\n");
 }
 
-void spmi_dump_pmif_record_reg(void)
+void spmi_dump_pmif_record_reg(int irq_m, int irq_p)
 {
 	struct pmif *arb = spmi_controller_get_drvdata(dbg_ctrl);
-	unsigned int i = 0, step, offset, tmp_dat;
+	unsigned int i = 0, step, offset, tmp_dat, dump = 0;
 	unsigned int chan, cmd, is_write, slvid, bytecnt, addr;
 	unsigned int wd_31_0, log_size = 0;
 
-	/* disable monitor channel 0 before dump */
-	tmp_dat = readl(arb->pmif_base[0] + arb->dbgregs[PMIF_MONITOR_CTRL]);
-	writel(tmp_dat & (~BIT(2)), arb->pmif_base[0] + arb->dbgregs[PMIF_MONITOR_CTRL]);
+	if ((irq_m == 0) && (irq_p == 0))
+		dump = 1;
 
-	step = arb->dbgregs[PMIF_MONITOR_RECORD_1_0] -
-		arb->dbgregs[PMIF_MONITOR_RECORD_0_0];
+	if (irq_m || dump) {
+		/* disable monitor channel 0 before dump */
+		tmp_dat = readl(arb->pmif_base[0] + arb->dbgregs[PMIF_MONITOR_CTRL]);
+		writel(tmp_dat & (~BIT(2)), arb->pmif_base[0] + arb->dbgregs[PMIF_MONITOR_CTRL]);
 
-	log_size += sprintf(wp, "");
-	for (i = 0; i < 32; i++) {
-		offset = arb->dbgregs[PMIF_MONITOR_RECORD_0_0] + i * step;
-		tmp_dat = readl(arb->pmif_base[0] + offset);
-		chan = (tmp_dat & (0x1f << 27)) >> 27;
-		cmd = (tmp_dat & (0x3 << 25)) >> 25;
-		is_write = (tmp_dat & (0x1 << 24)) >> 24;
-		slvid = (tmp_dat & (0xf << 20)) >> 20;
-		bytecnt = (tmp_dat & (0xf << 16)) >> 16;
-		addr = (tmp_dat & (0xffff << 0)) >> 0;
+		step = arb->dbgregs[PMIF_MONITOR_RECORD_1_0] -
+			arb->dbgregs[PMIF_MONITOR_RECORD_0_0];
 
-		offset = arb->dbgregs[PMIF_MONITOR_RECORD_0_1] + i * step;
-		wd_31_0 = readl(arb->pmif_base[0] + offset);
-		if (!bytecnt)
-			wd_31_0 &= 0xff;
+		log_size += sprintf(wp, "");
+		for (i = 0; i < 32; i++) {
+			offset = arb->dbgregs[PMIF_MONITOR_RECORD_0_0] + i * step;
+			tmp_dat = readl(arb->pmif_base[0] + offset);
+			chan = (tmp_dat & (0x1f << 27)) >> 27;
+			cmd = (tmp_dat & (0x3 << 25)) >> 25;
+			is_write = (tmp_dat & (0x1 << 24)) >> 24;
+			slvid = (tmp_dat & (0xf << 20)) >> 20;
+			bytecnt = (tmp_dat & (0xf << 16)) >> 16;
+			addr = (tmp_dat & (0xffff << 0)) >> 0;
 
-		log_size += sprintf(wp + log_size,
-			"[PMIF] (%d)[chan:%d, cmd:0x%x, rw:0x%x, slvid:%d, bytecnt:%d, ",
-			i, chan, cmd, is_write, slvid, bytecnt);
-		if (is_write)
-			log_size += sprintf(wp + log_size, "(addr 0x%x=0x%x)]\n", addr, wd_31_0);
-		else
-			log_size += sprintf(wp + log_size, "(addr 0x%x)]\n", addr);
+			offset = arb->dbgregs[PMIF_MONITOR_RECORD_0_1] + i * step;
+			wd_31_0 = readl(arb->pmif_base[0] + offset);
+			if (!bytecnt)
+				wd_31_0 &= 0xff;
 
-		if ((i + 1) % 8 == 0) {
-			pr_info("\n%s", wp);
-			log_size = 0;
+			log_size += sprintf(wp + log_size,
+				"[PMIF] (%d)[chan:%d, cmd:0x%x, rw:0x%x, slvid:%d, bytecnt:%d, ",
+				i, chan, cmd, is_write, slvid, bytecnt);
+			if (is_write)
+				log_size += sprintf(wp + log_size, "(addr 0x%x=0x%x)]\n", addr, wd_31_0);
+			else
+				log_size += sprintf(wp + log_size, "(addr 0x%x)]\n", addr);
+
+			if ((i + 1) % 8 == 0) {
+				pr_info("\n%s", wp);
+				log_size = 0;
+			}
 		}
+		/* logging mode no need to clear record */
+		if (log_size < 0)
+			pr_notice("sprintf failed\n");
+
+		/* enable monitor channel 0 after dump */
+		tmp_dat = readl(arb->pmif_base[0] + arb->dbgregs[PMIF_MONITOR_CTRL]);
+		writel(tmp_dat | BIT(2), arb->pmif_base[0] + arb->dbgregs[PMIF_MONITOR_CTRL]);
 	}
-	/* logging mode no need to clear record */
-	if (log_size < 0)
-		pr_notice("sprintf failed\n");
 
-	/* enable monitor channel 0 after dump */
-	tmp_dat = readl(arb->pmif_base[0] + arb->dbgregs[PMIF_MONITOR_CTRL]);
-	writel(tmp_dat | BIT(2), arb->pmif_base[0] + arb->dbgregs[PMIF_MONITOR_CTRL]);
-
-	if (!IS_ERR(arb->pmif_base[1])) {
+	if ((!IS_ERR(arb->pmif_base[1])) && (irq_p || dump)) {
 		/* disable monitor channel 0 before dump */
 		tmp_dat = readl(arb->pmif_base[1] + arb->dbgregs[PMIF_MONITOR_CTRL]);
 		writel(tmp_dat & (~BIT(2)), arb->pmif_base[1] + arb->dbgregs[PMIF_MONITOR_CTRL]);
@@ -2085,7 +2090,7 @@ static const struct file_operations dump_pmif_all_reg_proc_fops = {
 static int proc_dump_pmif_record_reg_show(struct seq_file *m, void *v)
 {
 	seq_puts(m, "********** PMIF dump record register**********\n");
-	spmi_dump_pmif_record_reg();
+	spmi_dump_pmif_record_reg(0, 0);
 	spmi_dump_pmif_record_reg_d(m);
 
 	return 0;
@@ -2127,8 +2132,129 @@ static const struct file_operations dump_spmimst_all_reg_proc_fops = {
 	.release = single_release,
 };
 
+static u32 gpmif_of;
+static u32 gpmif_val;
+static ssize_t pmif_access_show(struct device_driver *ddri, char *buf)
+{
+	int ret = 0;
+
+	if (buf == NULL) {
+		pr_notice("[%s] *buf is NULL!\n",  __func__);
+		return -EINVAL;
+	}
+	ret = sprintf(buf, "[%s] [0x%x]=0x%x\n", __func__, gpmif_of, gpmif_val);
+	if (ret < 0)
+		pr_notice("sprintf failed\n");
+
+	return strlen(buf);
+}
+static ssize_t pmif_access_store(struct device_driver *ddri,
+	const char *buf, size_t count)
+{
+	struct pmif *arb = spmi_controller_get_drvdata(dbg_ctrl);
+	int ret = 0;
+	u32 offset = 0;
+	u32 value = 0;
+
+	if (buf != NULL && count != 0) {
+		pr_info("[%s] size is %d, buf is %s\n",
+			__func__, (int)count, buf);
+
+		if (strlen(buf) < 3) {
+			pr_notice("%s() Invalid input!!\n", __func__);
+			return -EINVAL;
+		}
+
+		ret = sscanf(buf, "0x%x 0x%x", &offset, &value);
+		if (ret < 0)
+			return ret;
+		if (offset % 4 != 0) {
+			pr_notice("%s() Invalid offset!\n", __func__);
+			return -EINVAL;
+		}
+
+		if (ret == 2) {
+			if (offset > arb->dbgregs[PMIF_SWINF_3_STA]) {
+				pr_notice("%s() Illegal offset[0x%x]!!\n",
+					__func__, offset);
+			} else {
+				pr_info("%s() set offset[0x%lx]=0x%x\n",
+					__func__, (unsigned long)arb->pmif_base[0] + offset, value);
+				writel(value, arb->pmif_base[0] + offset);
+			}
+		}
+
+		gpmif_of = offset;
+		gpmif_val = readl(arb->pmif_base[0] + offset);
+	}
+	return count;
+}
+static u32 gspmi_of;
+static u32 gspmi_val;
+static ssize_t spmi_access_show(struct device_driver *ddri, char *buf)
+{
+	int ret = 0;
+
+	if (buf == NULL) {
+		pr_notice("[%s] *buf is NULL!\n",  __func__);
+		return -EINVAL;
+	}
+	ret = sprintf(buf, "[%s] [0x%x]=0x%x\n", __func__, gspmi_of, gspmi_val);
+	if (ret < 0)
+		pr_notice("sprintf failed\n");
+
+	return strlen(buf);
+}
+static ssize_t spmi_access_store(struct device_driver *ddri,
+	const char *buf, size_t count)
+{
+	struct pmif *arb = spmi_controller_get_drvdata(dbg_ctrl);
+	int ret = 0;
+	u32 offset = 0;
+	u32 value = 0;
+
+	if (buf != NULL && count != 0) {
+		pr_info("[%s] size is %d, buf is %s\n",
+			__func__, (int)count, buf);
+
+		if (strlen(buf) < 3) {
+			pr_notice("%s() Invalid input!!\n", __func__);
+			return -EINVAL;
+		}
+
+		ret = sscanf(buf, "0x%x 0x%x", &offset, &value);
+		if (ret < 0)
+			return ret;
+
+		if (value) {
+			if (offset > arb->spmimst_regs[SPMI_MST_DBG]) {
+				pr_notice("%s() Illegal offset[0x%x]!!\n",
+					__func__, offset);
+			} else {
+				pr_info("%s() set offset[0x%lx]=0x%x\n",
+					__func__, (unsigned long)arb->spmimst_base[0] + offset,
+					value);
+				writel(value, arb->spmimst_base[0] + offset);
+			}
+		}
+
+		gspmi_of = offset;
+		gspmi_val = readl(arb->spmimst_base[0] + offset);
+	}
+	return count;
+}
+static DRIVER_ATTR_RW(pmif_access);
+static DRIVER_ATTR_RW(spmi_access);
+
+static struct driver_attribute *spmi_pmif_attr_list[] = {
+	&driver_attr_pmif_access,
+	&driver_attr_spmi_access,
+};
+
 int spmi_pmif_create_attr(struct device_driver *driver)
 {
+	int idx, err;
+	int num = ARRAY_SIZE(spmi_pmif_attr_list);
 	struct dentry *mtk_spmi_dir;
 
 	mtk_spmi_dir = debugfs_create_dir("mtk_spmi", NULL);
@@ -2157,7 +2283,16 @@ int spmi_pmif_create_attr(struct device_driver *driver)
 	if (driver == NULL)
 		return -EINVAL;
 
-	return 0;
+	/* /sys/bus/platform/drivers/spmi-mtk/ */
+	for (idx = 0; idx < num; idx++) {
+		err = driver_create_file(driver, spmi_pmif_attr_list[idx]);
+		if (err) {
+			pr_notice("%s() driver_create_file %s err:%d\n",
+			__func__, spmi_pmif_attr_list[idx]->attr.name, err);
+			break;
+		}
+	}
+	return err;
 }
 EXPORT_SYMBOL_GPL(spmi_pmif_create_attr);
 
